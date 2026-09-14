@@ -1,0 +1,4 @@
+python-telegram-bot==22.8
+aiosqlite==0.20.0
+python-dotenv==1.0.1
+yookassa==3.5.0
