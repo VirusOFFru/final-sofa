@@ -1,29 +1,44 @@
 """
 Единый источник правды для расчёта стоимости заказа.
 
-Раньше логика дублировалась в bot.py / keyboards.py и расходилась
-(где-то «бесплатно от 2», где-то «от 3»). Теперь всё считается ЗДЕСЬ,
-и любой экран берёт цифры отсюда.
+Любой экран (корзина, подтверждение, оплата) берёт цифры ТОЛЬКО отсюда.
 
 Правила:
-  • 1 брелок            → доставка 389 ₽
-  • 2 брелока           → доставка бесплатно
-  • 3+ брелока          → доставка бесплатно + скидка 10% на товары
+  • Скидка 10% на брелоки — если в заказе от 2 брелоков (штук).
+  • Доставка бесплатная — если сумма брелоков от 1000 ₽.
+    Сумма считается ТОЛЬКО по брелокам: без доставки и до применения скидки.
+  • Иначе доставка — 389 ₽.
 """
 from dataclasses import dataclass
 
 from config import (
     DELIVERY_COST,
-    FREE_DELIVERY_FROM,
-    DISCOUNT_FROM,
+    FREE_DELIVERY_SUM,
+    DISCOUNT_FROM_QTY,
     DISCOUNT_PERCENT,
 )
 
 
+def plural_keychain(n: int) -> str:
+    """1 брелок, 2 брелока, 5 брелоков, 11 брелоков, 21 брелок."""
+    n = abs(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return "брелок"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "брелока"
+    return "брелоков"
+
+
+def plural_keychain_from(n: int) -> str:
+    """Для оборота «от N ...»: от 1 брелока, от 2 брелоков, от 21 брелока."""
+    n = abs(n)
+    return "брелока" if (n % 10 == 1 and n % 100 != 11) else "брелоков"
+
+
 @dataclass
 class CartSummary:
-    subtotal: int          # сумма товаров без скидки и доставки
-    quantity: int          # общее число брелков
+    subtotal: int          # сумма брелоков без скидки и доставки
+    quantity: int          # общее число брелоков
     delivery: int          # стоимость доставки (0 = бесплатно)
     discount_percent: int  # применённая скидка в %
     discount_amount: int   # размер скидки в рублях
@@ -35,13 +50,13 @@ class CartSummary:
 
     @property
     def to_free_delivery(self) -> int:
-        """Сколько брелков не хватает до бесплатной доставки (0 если уже)."""
-        return max(0, FREE_DELIVERY_FROM - self.quantity)
+        """Сколько рублей брелоков не хватает до бесплатной доставки (0 если уже)."""
+        return max(0, FREE_DELIVERY_SUM - self.subtotal)
 
     @property
     def to_discount(self) -> int:
-        """Сколько брелков не хватает до скидки (0 если уже)."""
-        return max(0, DISCOUNT_FROM - self.quantity)
+        """Сколько брелоков не хватает до скидки (0 если уже)."""
+        return max(0, DISCOUNT_FROM_QTY - self.quantity)
 
 
 def calculate(items) -> CartSummary:
@@ -55,14 +70,15 @@ def calculate(items) -> CartSummary:
         subtotal += price * qty
         quantity += qty
 
-    # Доставка: платим только если брелков меньше порога
-    delivery = 0 if quantity >= FREE_DELIVERY_FROM else DELIVERY_COST
-    if quantity == 0:
-        delivery = 0
-
-    # Скидка на товары
-    discount_percent = DISCOUNT_PERCENT if quantity >= DISCOUNT_FROM else 0
+    # Скидка на брелоки — по количеству штук
+    discount_percent = DISCOUNT_PERCENT if quantity >= DISCOUNT_FROM_QTY else 0
     discount_amount = int(subtotal * discount_percent / 100)
+
+    # Доставка — по сумме брелоков (без доставки, до скидки)
+    if quantity == 0 or subtotal >= FREE_DELIVERY_SUM:
+        delivery = 0
+    else:
+        delivery = DELIVERY_COST
 
     total = subtotal - discount_amount + delivery
 
@@ -82,7 +98,8 @@ def format_cart_lines(items) -> str:
     for item in items:
         price = int(item["price"])
         qty = int(item["quantity"])
-        lines.append(f"• {item['name']} — {qty} шт. × {price} ₽ = {price * qty} ₽")
+        name = item["name"] if "name" in item.keys() else item["product_name"]
+        lines.append(f"• {name} — {qty} шт. × {price} ₽ = {price * qty} ₽")
     return "\n".join(lines)
 
 
@@ -95,7 +112,7 @@ def render_summary(summary: CartSummary, items=None, title: str = "🛒 Ваша
         parts.append(format_cart_lines(items))
 
     parts.append("")
-    parts.append(f"💰 Сумма товаров: {summary.subtotal} ₽")
+    parts.append(f"💰 Сумма брелоков: {summary.subtotal} ₽")
 
     if summary.discount_percent > 0:
         parts.append(
@@ -115,31 +132,28 @@ def render_summary(summary: CartSummary, items=None, title: str = "🛒 Ваша
     return "\n".join(parts)
 
 
-def hint_for(summary: CartSummary) -> str:
-    """Подсказка-мотиватор для корзины. Пустая строка — если подсказывать нечего."""
+def hints_for(summary: CartSummary) -> list[str]:
+    """Подсказки-мотиваторы для корзины (по одной на кнопку). Пустой список — подсказывать нечего."""
     if summary.quantity == 0:
-        return ""
+        return []
 
-    if summary.free_delivery and summary.discount_percent > 0:
-        return "🎉 Доставка бесплатно + скидка 10% применена"
+    if summary.discount_percent > 0 and summary.free_delivery:
+        return [f"🎉 Скидка {summary.discount_percent}% + бесплатная доставка!"]
 
-    if not summary.free_delivery and summary.to_free_delivery > 0:
-        left = summary.to_free_delivery
-        word = "брелок" if left == 1 else ("брелока" if left in (2, 3, 4) else "брелоков")
-        return f"💡 Добавьте ещё {left} {word} — доставка бесплатно"
-
-    if summary.free_delivery and summary.to_discount > 0:
+    hints = []
+    if summary.discount_percent == 0 and summary.to_discount > 0:
         left = summary.to_discount
-        word = "брелок" if left == 1 else ("брелока" if left in (2, 3, 4) else "брелоков")
-        return f"🎁 Ещё {left} {word} — и скидка {DISCOUNT_PERCENT}%"
-
-    return ""
+        hints.append(f"🎁 Ещё {left} {plural_keychain(left)} — скидка {DISCOUNT_PERCENT}%")
+    if not summary.free_delivery and summary.to_free_delivery > 0:
+        hints.append(f"🚚 Ещё {summary.to_free_delivery} ₽ — доставка бесплатно")
+    return hints
 
 
 def rules_text() -> str:
-    """Описание условий акции — для всплывающей подсказки."""
+    """Описание условий акции — для всплывающей подсказки (Telegram: максимум 200 символов)."""
     return (
-        f"🚚 Доставка {DELIVERY_COST} ₽ — только за 1 брелок\n\n"
-        f"От {FREE_DELIVERY_FROM} брелоков — доставка БЕСПЛАТНО 🎉\n"
-        f"От {DISCOUNT_FROM} брелоков — ещё и скидка {DISCOUNT_PERCENT}% на товары 🎁"
+        f"🎁 От {DISCOUNT_FROM_QTY} {plural_keychain_from(DISCOUNT_FROM_QTY)} — скидка {DISCOUNT_PERCENT}%\n\n"
+        f"🚚 Брелоков на {FREE_DELIVERY_SUM} ₽ и больше — доставка бесплатно "
+        f"(доставка в сумму не входит)\n\n"
+        f"Иначе доставка — {DELIVERY_COST} ₽"
     )

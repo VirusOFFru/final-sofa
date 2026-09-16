@@ -26,14 +26,22 @@ def is_configured() -> bool:
     return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET)
 
 
-def create_payment(amount: float, order_id: int, user_id: int, description: str) -> dict:
+def create_payment(
+    amount: float,
+    order_id: int,
+    user_id: int,
+    description: str,
+    return_url: str | None = None,
+) -> dict:
     """
     Создаёт платёж в ЮKassa.
 
+    return_url — куда вернуть покупателя после оплаты (для ВК — ссылка на сообщество).
     Возвращает: {"payment_id": ..., "confirmation_url": ..., "status": ...}
     """
     _configure()
-    return_url = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "https://t.me"
+    if not return_url:
+        return_url = f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "https://t.me"
 
     payment = Payment.create(
         {
